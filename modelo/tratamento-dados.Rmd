@@ -1,0 +1,92 @@
+---
+jupyter:
+  jupytext:
+    text_representation:
+      extension: .Rmd
+      format_name: rmarkdown
+      format_version: '1.2'
+      jupytext_version: 1.3.0
+  kernelspec:
+    display_name: Python 3
+    language: python
+    name: python3
+---
+
+# Importação dos coeficientes aerodinâmicos
+Este programa lê os arquivos CSV que contém os coeficientes de sustentação e arrasto, em diferentes faixas de ângulo.
+
+Os gráficos de cada faixa são unidos em um gráfico único para cada coeficiente. Cada conjunto de dados consolidado é escrito em uma tabela de um banco de dados *SQLite*.
+
+```{python}
+# %autosave 0
+# %matplotlib notebook
+import matplotlib
+import matplotlib.pyplot as plt
+plt.style.use('dark_background')
+
+import pandas as pd
+import sqlite3 as sql
+```
+
+```{python}
+# Importação dos dados a partir dos arquivos CSV
+lift_baixos = pd.read_csv('dados-lift-baixos.csv',delimiter=';',names=['alpha','cl'])
+lift_altos = pd.read_csv('dados-lift-altos.csv', delimiter=';', names=['alpha','cl'])
+drag_baixos = pd.read_csv('dados-drag-baixos.csv', delimiter=';', names=['alpha','cd'])
+drag_altos = pd.read_csv('dados-drag-altos.csv', delimiter=';', names=['alpha','cd'])
+```
+
+```{python}
+# Exibe os dados originais para cada coeficiente
+fig = plt.figure(figsize=(8.5,8))
+# fig = plt.figure
+plt.subplot(211)
+plt.title('Coef. Sustentação')
+plt.plot(lift_baixos['alpha'],lift_baixos['cl'])
+plt.plot(lift_altos['alpha'], lift_altos['cl'])
+plt.subplot(212)
+plt.title('Coef. Arrasto')
+plt.plot(drag_baixos['alpha'], drag_baixos['cd'])
+plt.plot(drag_altos['alpha'], drag_altos['cd'])
+plt.show()
+```
+
+```{python}
+# Combina os gráficos para o coeficiente de sustentação
+join = 0.4
+lift_baixos_cut = lift_baixos[lift_baixos['alpha'] < join]
+lift_altos_cut = lift_altos[lift_altos['alpha'] >= join]
+lift_merged = lift_baixos_cut.append(lift_altos_cut)
+lift_merged.reset_index(drop=True, inplace=True)
+
+fig = plt.figure()
+plt.plot(lift_merged['alpha'], lift_merged['cl'])
+plt.show()
+```
+
+```{python}
+# Combina os gráficos para o coeficiente de arrasto
+join = 16
+drag_baixos_cut = drag_baixos[drag_baixos['alpha'] < join]
+drag_altos_cut = drag_altos[drag_altos['alpha'] >= join]
+drag_merged = drag_baixos_cut.append(drag_altos_cut)
+drag_merged.reset_index(drop=True, inplace=True)
+
+fig = plt.figure()
+plt.plot(drag_merged['alpha'], drag_merged['cd'])
+# plt.xlim([15,17])
+# plt.ylim([0,0.1])
+plt.show()
+```
+
+```{python}
+# Escreve os dataframes para as tabelas no SQLite. 
+# Se as tabelas já existirem, elas são apagadas e reescritas.
+connection = sql.connect('coefs.db')
+cursor = connection.cursor()
+cursor.execute('DROP TABLE IF EXISTS lift')
+cursor.execute('DROP TABLE IF EXISTS drag')
+lift_merged.to_sql('lift',connection)
+drag_merged.to_sql('drag',connection)
+connection.close()
+```

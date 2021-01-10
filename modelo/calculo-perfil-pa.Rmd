@@ -1,0 +1,45 @@
+---
+jupyter:
+  jupytext:
+    text_representation:
+      extension: .Rmd
+      format_name: rmarkdown
+      format_version: '1.2'
+      jupytext_version: 1.3.0
+  kernelspec:
+    display_name: Python 3
+    language: python
+    name: python3
+---
+
+# Cálculo do perfil da pá desenhado para o modelo do Wind Power Sim
+Os únicos dados da pá que serão utilizados aqui são a envergadura e o comprimento de corda.
+O perfil aerodinâmico assumido é o NACA 4415.
+
+```{python}
+# %autosave 0
+import matplotlib
+import matplotlib.pyplot as plt
+plt.style.use('dark_background')
+
+import pandas as pd
+import numpy as np
+```
+
+```{python}
+perfil_a = pd.read_csv('Pa-Lado-A.csv', delimiter=';', names=['l', 'chord'])
+perfil_b = pd.read_csv('Pa-Lado-B.csv', delimiter=';', names=['l', 'chord'])
+total_chord = perfil_a['chord'] - perfil_b['chord']
+average_chord = np.average(total_chord)
+```
+
+```{python}
+print('O comprimento de corda médio é', np.around(average_chord, 5))
+fig = plt.figure()
+ax = plt.axes()
+plt.plot(perfil_a['l'], total_chord, label='chord')
+plt.hlines(average_chord, np.min(perfil_a['l']), np.max(perfil_a['l']),
+          color='y', label='média')
+plt.legend()
+plt.show()
+```

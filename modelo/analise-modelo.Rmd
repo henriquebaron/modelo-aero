@@ -1,0 +1,455 @@
+---
+jupyter:
+  jupytext:
+    text_representation:
+      extension: .Rmd
+      format_name: rmarkdown
+      format_version: '1.2'
+      jupytext_version: 1.3.0
+  kernelspec:
+    display_name: Python 3
+    language: python
+    name: python3
+---
+
+# Modelo de velocidade do aerogerador
+Este notebook analisa um modelo para o comportamento do aerogerador.
+Ele considera o comportamento aerodinâmico das pás, incluindo a variação no ângulo de *pitch*.
+Além disso, valores de momento de inércia para os componentes foram considerados, para definir as respostas de velocidade e aceleração do gerador.
+O comportamento do gerador é modelado como sendo linearmente proporcional à sua velocidade de rotação, e perdas elétricas e mecânicas são desconsideradas.
+
+Aqui são utilizados dados obtidos em artigos para os coeficientes de sustentação e arrasto, considerando um perfil aerodinâmico NACA 4415 para as pás. Um ângulo de torção dimensionado para as velocidades nominais também é considerado.
+
+```{python}
+# %autosave 0
+# %matplotlib notebook
+import numpy as np
+from scipy import integrate
+from scipy import optimize
+import pandas as pd
+import sqlite3 as sql
+import matplotlib
+import matplotlib.pyplot as plt
+from mpl_toolkits import mplot3d
+plt.style.use('dark_background')
+```
+
+## Dados de entrada do problema
+Todos os dados do aerogerador são concentrados aqui, junto com seus parâmetros nominais de operação.
+
+```{python}
+global max_radius
+global nom_rot_speed
+global nom_wind_speed
+global nom_power
+max_radius = 41 # Raio máximo da pá, em metros
+air_density = 1.225 # Densidade do ar, em kg/m^3
+nom_rot_speed = 18 # Velocidade de rotação, em RPM (nominal do aerogerador)
+nom_wind_speed = 14 # Velocidade do vento, em m/s (nominal do aerogerador)
+chord = 2.7 # Comprimento de corda *médio* das pás, em metros
+nom_power = 2e6 # Potência nominal do aerogerador modelado, em watts
+
+shaft_inertia = 187.2 # Momento de inércia do eixo, em kg*m^2
+hub_inertia = 951 # Momento de inércia do hub, em kg*m^2
+blades_inertia = 67240000 # Momento de inércia das pás, em kg*m^2
+total_inertia = np.sum([shaft_inertia, hub_inertia, blades_inertia])
+```
+
+## Obtenção dos coeficientes de sustentação e arrasto
+Através de um banco de dados *SQLite*.
+São dados de entrada, mas que são obtidos a partir de uma tabela.
+
+Como os dados obtidos não atendem à faixa de ângulos de ataque necessária, os valores serão também extrapolados através de ajustes polinomiais.
+
+```{python}
+# Lê as tabelas de coeficientes como DataFrames
+connection = sql.connect('coefs.db')
+lift_coefs_orig = pd.read_sql('SELECT alpha,cl FROM lift', connection, index_col='alpha')
+drag_coefs_orig = pd.read_sql('SELECT alpha,cd FROM drag', connection, index_col='alpha')
+connection.close()
+```
+
+```{python}
+fig = plt.figure()
+ax = plt.axes()
+plt.plot(lift_coefs_orig, label='Sustentação')
+plt.plot(drag_coefs_orig, label='Arrasto')
+plt.legend()
+plt.suptitle('Valores originais dos coeficientes')
+ax.set_xlabel('Ângulo ataque [°]')
+plt.show()
+```
+
+```{python}
+sample_data = lift_coefs_orig[lift_coefs_orig.index >= 60]
+params = np.polyfit(sample_data.index, sample_data['cl'], 1)
+print('Parâmetros otimizados:', params)
+alpha_min = np.max(lift_coefs_orig.index) + 0.1
+alpha_max = 140
+x_size = (alpha_max - alpha_min)/0.1 + 1
+x = np.around(np.linspace(alpha_min, alpha_max, x_size), 1)
+```
+
+```{python}
+fig = plt.figure()
+ax = plt.axes()
+plt.plot(lift_coefs_orig, label='Dados')
+plt.plot(x, np.polyval(params, x), label='Extrapolado')
+plt.legend()
+plt.suptitle('Extrapolação do coeficiente de sustentação')
+ax.set_xlabel('Ângulo de ataque [°]')
+ax.set_ylabel('Coeficiente de sustentação [-]')
+plt.show()
+```
+
+```{python}
+# Adiciona os dados extrapolados ao DataFrame
+extrap_data = pd.DataFrame(data=np.polyval(params, x), index=x, columns=['cl'])
+lift_coefs = lift_coefs_orig.append(extrap_data)
+```
+
+```{python}
+sample_data = drag_coefs_orig[drag_coefs_orig.index >= 20]
+params = np.polyfit(sample_data.index, sample_data['cd'], 5)
+print('Parâmetros otimizados:', params)
+alpha_min = np.max(drag_coefs_orig.index) + 0.1
+alpha_max = 140
+x_size = (alpha_max - alpha_min)/0.1 + 1
+x = np.around(np.linspace(alpha_min, alpha_max, x_size), 1)
+```
+
+```{python}
+fig = plt.figure()
+ax = plt.axes()
+plt.plot(drag_coefs_orig, label='Dados')
+plt.plot(x, np.polyval(params, x), label='Extrapolado')
+plt.legend()
+plt.suptitle('Extrapolação do coeficiente de arrasto')
+ax.set_xlabel('Ângulo de ataque [°]')
+ax.set_ylabel('Coeficiente de arrasto [-]')
+plt.show()
+```
+
+```{python}
+extrap_data = pd.DataFrame(data=np.polyval(params, x), index=x, columns=['cd'])
+drag_coefs = drag_coefs_orig.append(extrap_data)
+```
+
+```{python}
+lift_drag_ratio = lift_coefs['cl']/drag_coefs['cd']
+max_ratio = np.max(lift_drag_ratio)
+optimal_alpha = lift_coefs.index[np.where(lift_drag_ratio == max_ratio)[0][0]]
+print('O ângulo de ataque ótimo é', optimal_alpha, 'graus')
+fig = plt.figure()
+ax = plt.axes()
+plt.plot(lift_coefs.index.values, lift_drag_ratio)
+plt.suptitle('Razão sustentação-arrasto da pá')
+ax.set_xlabel('Ângulo de ataque [°]')
+plt.show()
+```
+
+```{python}
+# Função para ler o coeficiente de um dos dataframes conforme o valor do ângulo
+# O ângulo alpha deve estar em *radianos*
+def get_coef(alpha, df):
+    get_index = lambda a, df: np.where(np.around(df.index.values, 1)
+                                       == np.around(np.rad2deg(a), 1))[0][0]
+    if np.shape(alpha) == ():
+        # Se alpha for um escalar, aplica uma vez e retorna na mesma dimensão
+        try:
+            return df.values[get_index(alpha, df)]
+        except IndexError as ie:
+            return np.nan
+    # Se alpha for um array, aplica a expressão lambda elemento-a-elemento
+    with np.nditer([alpha, None]) as it:
+        for a, coef in it:
+            try:
+                coef[...] = df.values[get_index(a, df)]
+            except IndexError as ie:
+                coef[...] = np.nan
+        return it.operands[1]
+```
+
+## Obtenção da curva de potência
+Geração de uma curva de potência em relação à velocidade de _rotação_ do aerogerador,
+baseada na curva de potência em relação à velocidade do vento.
+
+```{python}
+power_curve = pd.read_csv('curva-potencia-e82.csv', sep=';', index_col=0,
+                         names=['power'])
+fig = plt.figure()
+ax = plt.axes()
+plt.plot(power_curve)
+plt.title('Curva de potência do Enercon E82 - 2 MW')
+ax.set_xlabel('Velocidade do vento [m/1s]')
+ax.set_ylabel('Potência [W]')
+ax.ticklabel_format(axis='y', style='sci', scilimits=(0,2))
+plt.show()
+```
+
+```{python}
+# params = np.polyfit(power_curve.index, power_curve['power'], 5)
+normalized_speed = power_curve.index.values / nom_wind_speed
+normalized_power = power_curve['power'].values / nom_power
+params_power, residuals, _, _, _ = np.polyfit(normalized_speed, normalized_power,
+                                              13, full=True)
+power_fit_domain = (np.min(normalized_speed), np.max(normalized_speed))
+
+print('O resíduo do ajuste polinomial é', residuals[0])
+fig = plt.figure()
+plt.plot(normalized_speed, normalized_power, label='Original')
+plt.plot(normalized_speed, np.polyval(params_power, normalized_speed), label='Fit')
+plt.legend()
+plt.show()
+```
+
+## Preparação do problema
+Desenvolvimento de todas as funções que vão definir o comportamento dinâmico do aerogerador.
+
+```{python}
+# Conversão de RPM para radianos por segundo
+def angular_vel(rpm):
+    return rpm * np.pi / 30
+```
+
+```{python}
+def rpm_vel(angular):
+    return angular * 30 / np.pi
+```
+
+#### Definição do ângulo de *twist* da pá
+Função que retorna a torção da pá conforme o raio
+
+```{python}
+# Retorna o ângulo de torção da pá (em radianos) de acordo com o raio
+def twist_angle(radius):
+    # Utiliza as variáveis globais por ser uma característica construtiva
+    max_twist = np.arctan(angular_vel(nom_rot_speed) * max_radius / nom_wind_speed)
+    return max_twist - np.arctan(angular_vel(nom_rot_speed) * radius / nom_wind_speed)
+```
+
+#### Funções do modelo aerodinâmico
+
+```{python}
+# Retorna o ângulo relativo (em radianos) de incidência do vento
+# O ângulo é medido em relação à direção tangencial ao movimento da pá
+def angle_incidence(wind_speed, rot_speed, radius):
+    return np.pi / 2 - np.arctan(angular_vel(rot_speed) * radius / wind_speed)
+```
+
+```{python}
+# Retorna o ângulo de ataque (em radianos) incidindo em um ponto da pá,
+# considerando o ângulo de torção
+def angle_attack(wind_speed, rot_speed, radius, pitch):
+    incidence = angle_incidence(wind_speed, rot_speed, radius)
+    twist = twist_angle(radius)
+    return incidence + pitch - twist
+```
+
+```{python}
+# Retorna a velocidade relativa do vento em um ponto específico da pá
+def wind_rel_speed(wind_speed, rot_speed, radius):
+    tan_speed = angular_vel(rot_speed) * radius;
+    return np.sqrt(np.square(tan_speed) + np.square(wind_speed))
+```
+
+```{python}
+# Força de sustentação em um ponto da pá (seccional, em força por unidade de comprimento)
+def lift_load_section(wind_speed, rot_speed, radius, lift_coef, chord, air_density):
+    rel_speed = wind_rel_speed(wind_speed, rot_speed, radius)
+    return 0.5 * air_density * np.square(rel_speed) * lift_coef * chord
+```
+
+```{python}
+# Força de arrasto em um ponto da pá (seccional, em força por unidade de comprimento)
+def drag_load_section(wind_speed, rot_speed, radius, drag_coef, chord, air_density):
+    rel_speed = wind_rel_speed(wind_speed, rot_speed, radius)
+    return 0.5 * air_density * np.square(rel_speed) * drag_coef * chord
+```
+
+```{python}
+# Força tangencial em um ponto da pá (seccional, em força por unidade de comprimento)
+def tan_load_section(wind_speed, rot_speed, radius, lift_coef, drag_coef,
+                      chord, air_density):
+    lift = lift_load_section(wind_speed, rot_speed, radius, lift_coef, chord, air_density)
+    drag = drag_load_section(wind_speed, rot_speed, radius, drag_coef, chord, air_density)
+    incidence = angle_incidence(wind_speed, rot_speed, radius)
+    return lift * np.sin(incidence) - drag * np.cos(incidence)
+```
+
+```{python}
+# Força axial em um ponto da pá (seccional, em força por unidade de comprimento)
+def axial_load_section(wind_speed, rot_speed, radius, lift_coef, drag_coef,
+                       chord, air_density):
+    lift = lift_load_section(wind_speed, rot_speed, radius, lift_coef, chord, air_density)
+    drag = drag_load_section(wind_speed, rot_speed, radius, drag_coef, chord, air_density)
+    incidence = angle_incidence(wind_speed, rot_speed, radius)
+    return - lift * np.cos(incidence) - drag * np.sin(incidence)
+```
+
+```{python}
+# Função que calcula o momento em um ponto da pá. Serve para ser integrada ao longo
+# comprimento da pá. O ângulo de pitch deve estar em *radianos*
+def point_momentum(radius, wind_speed, rot_speed, pitch, lift_coefs, drag_coefs,
+                  chord, air_density):
+    alpha = angle_attack(wind_speed, rot_speed, radius, pitch)
+    lift_coef = get_coef(alpha, lift_coefs)
+    drag_coef = get_coef(alpha, drag_coefs)
+    load = tan_load_section(wind_speed, rot_speed, radius, lift_coef, drag_coef, chord,
+                           air_density)
+    return load * radius
+```
+
+```{python}
+# Calcula o momento total atuando na pá, para um ângulo de pitch (em radianos)
+def total_momentum(pitch, wind_speed, rot_speed, max_radius, lift_coefs, drag_coefs,
+                  chord, air_density, integration_limit=50):
+    # Expressão lambda que integra o momento em um ponto ao longo da pá, e retorna o
+    # momento total sobre a pá.
+    get_momentum = lambda p: integrate.quad(point_momentum,
+                                            0, max_radius,
+                                            args=(wind_speed, rot_speed, p, lift_coefs,
+                                                  drag_coefs, chord, air_density),
+                                           limit=integration_limit)[0]
+    try:
+        # Se pitch é um array de ângulos, executa o cálculo da integral para cada elemento
+        blade_momentum = np.zeros(np.size(pitch))
+        i = 0
+        for p in pitch:
+            blade_momentum[i] = get_momentum(p)
+            i += 1
+    except TypeError as te:
+        # Se pitch for um escalar, calcula um único valor de momento total
+        blade_momentum = get_momentum(pitch)
+    # Retorna o momento multiplicado pelo número de pás
+    return 3 * blade_momentum
+```
+
+#### Definição do torque de oposição do gerador
+O torque de resposta do gerador é modelado como sendo linearmente proporcional à velocidade de rotação.
+O torque nominal do gerador é atingido na velocidade nominal, e a função sempre retorna um valor negativo, para manter a consistência com o sistema de coordenadas utilizado.
+
+```{python}
+def generator_torque(angular_velocity, polyfit_params, polyfit_domain):
+    nom_angular_vel = angular_vel(nom_rot_speed)
+    ratio = angular_velocity/nom_angular_vel
+    nom_torque = nom_power / nom_angular_vel
+    if ratio < polyfit_domain[0]:
+        x = 0
+    elif ratio > polyfit_domain[1]:
+        x = 1
+    else:
+        x = ratio
+    return -nom_torque * np.polyval(polyfit_params, x)
+```
+
+## Momento para diferentes ângulos de pitch
+Considerando que o rotor e o vento estejam em suas velocidades nominais
+
+```{python}
+# Momento necessário para operar na potência nominal
+required_momentum = nom_power / angular_vel(nom_rot_speed)
+
+# Momento nas condições nominais, com diferentes ângulos de pitch
+pitch = np.deg2rad(np.linspace(-5, 95, 200))
+nom_momentum = total_momentum(pitch, nom_wind_speed, nom_rot_speed, max_radius, lift_coefs,
+                              drag_coefs, chord, air_density)
+```
+
+```{python}
+fig = plt.figure()
+ax = fig.add_subplot(111)
+plt.plot(np.rad2deg(pitch), nom_momentum * 1e-6, label='efetivo')
+plt.hlines(required_momentum * 1e-6, -5, 77, colors='y', label='nominal')
+plt.title('Momento total produzido')
+ax.set_ylabel('Momento [MN.m]')
+ax.set_xlabel('Pitch [°]')
+plt.legend()
+plt.grid(which='both', color='w', linestyle='--', linewidth=0.5)
+plt.show()
+```
+
+## Coeficientes de sustentação e arrasto
+#### para diferentes condições de operação
+Como a função `get_coef` pode retornar valores `NaN` se o ângulo de ataque estiver fora dos valores previstos, essa seção analisa sob quais condições de operação existem coeficientes válidos, de modo a definir os intervalos nos quais a função `point_momentum` é integrável em relação ao raio.
+
+```{python}
+rot_speed = 0 # Condição de rotor parado
+wind_speed = 3
+radius = np.linspace(0, max_radius)
+pitch = np.deg2rad(np.linspace(-5, 95))
+X, Y = np.meshgrid(radius, pitch)
+alpha = angle_attack(wind_speed, rot_speed, X, Y)
+
+fig = plt.figure()
+ax = plt.axes(projection='3d')
+ax.plot_wireframe(X, np.rad2deg(Y), np.rad2deg(alpha), color='r')
+plt.suptitle('Ângulo de ataque com o rotor parado')
+ax.set_xlabel('Raio [m]')
+ax.set_ylabel('Pitch [°]')
+ax.set_zlabel('Ataque [°]')
+plt.show()
+```
+
+```{python}
+lift = get_coef(alpha, lift_coefs)
+
+fig = plt.figure()
+ax = plt.axes(projection='3d')
+ax.plot_wireframe(X, np.rad2deg(Y), lift, color='b')
+plt.suptitle('Coeficiente de sustentação com rotor parado')
+ax.set_xlabel('Raio [m]')
+ax.set_ylabel('Pitch [°]')
+ax.set_zlabel('Coef. sust.')
+plt.show()
+```
+
+```{python}
+drag = get_coef(alpha, drag_coefs)
+
+fig = plt.figure()
+ax = plt.axes(projection='3d')
+ax.plot_wireframe(X, np.rad2deg(Y), drag, color='g')
+plt.suptitle('Coeficiente de arrasto com rotor parado')
+ax.set_xlabel('Raio [m]')
+ax.set_ylabel('Pitch [°]')
+ax.set_zlabel('Coef. arrasto')
+plt.show()
+```
+
+# Avaliações ao longo do tempo
+Esta seção avalia o comportamento do aerogerador ao longo do tempo, utilizando o modelo aerodinâmico descrito anteriormente
+
+```{python}
+time = np.linspace(0, 1200, 250)
+speed = np.zeros(np.size(time))
+wind_speed = 14
+pitch_angle = np.deg2rad(-5)
+activate_generator = False
+
+for i in range(np.size(time)):
+    if i > 0:
+        time_delta = time[i] - time[i-1]
+        speed[i] = speed[i-1] + acceleration * time_delta
+    momentum = total_momentum(pitch_angle, wind_speed, speed[i], max_radius, lift_coefs,
+                              drag_coefs, chord, air_density)
+    if rpm_vel(speed[i]) > 2:
+        activate_generator = True
+        pitch_angle = np.deg2rad(7.3)
+    if activate_generator:
+        oposing_torque = generator_torque(speed[i], params_power, power_fit_domain)
+    else:
+        oposing_torque = 0
+    acceleration = (momentum + oposing_torque) /total_inertia
+    print('Progresso:', i, 'de', np.size(time))
+    print('Instante:', time[i])
+    print('Momento:', momentum)
+    print('Velocidade:', rpm_vel(speed[i]), '\n')
+
+```
+
+```{python}
+fig = plt.figure()
+plt.plot(time, rpm_vel(speed))
+plt.show()
+```

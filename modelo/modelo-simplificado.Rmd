@@ -1,0 +1,63 @@
+---
+jupyter:
+  jupytext:
+    text_representation:
+      extension: .Rmd
+      format_name: rmarkdown
+      format_version: '1.2'
+      jupytext_version: 1.3.0
+  kernelspec:
+    display_name: Python 3
+    language: python
+    name: python3
+---
+
+# Modelo _simplificado_ para a velocidade do gerador
+
+```{python}
+# %autosave 0
+# %matplotlib notebook
+import numpy as np
+import matplotlib
+import matplotlib.pyplot as plt
+from mpl_toolkits import mplot3d
+plt.style.use('dark_background')
+```
+
+## Dados de entrada do problema
+Todos os dados necessários à resolução do problema são encontrados aqui, junto com os parâmetros nominais de operação.
+
+```{python}
+global nom_wind_speed
+global nom_rot_speed
+global nom_power
+global pitch_range
+nom_wind_speed = 14 # Velocidade nominal do vento, em m/s
+nom_rot_speed = 18 # Velocidade nominal de rotação em RPM
+nom_power = 2e6 # Potência nominal, em watts
+pitch_range = (-5, 95) # Limites de atuação do ângulo de passo, em graus
+```
+
+```{python}
+def get_speed(wind_speed, pitch_angle):
+    pitch_ratio = 1 - (pitch_angle - pitch_range[0]) / (pitch_range[1] - pitch_range[0])
+    wind_ratio = wind_speed / nom_wind_speed
+    return nom_rot_speed * pitch_ratio * wind_ratio
+```
+
+```{python}
+wind_speed = np.linspace(0, nom_wind_speed)
+pitch_angle = np.linspace(pitch_range[0], pitch_range[1])
+X, Y = np.meshgrid(wind_speed, pitch_angle)
+rot_speed = get_speed(X, Y)
+```
+
+```{python}
+fig = plt.figure()
+ax = plt.axes(projection='3d')
+ax.plot_wireframe(X, Y, rot_speed, color='b')
+ax.set_xlabel('Vel. vento [m/s]')
+ax.set_ylabel('Pitch [°]')
+ax.set_zlabel('Vel. rotação [RPM]')
+plt.show()
+```

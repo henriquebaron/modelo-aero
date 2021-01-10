@@ -1,0 +1,221 @@
+---
+jupyter:
+  jupytext:
+    text_representation:
+      extension: .Rmd
+      format_name: rmarkdown
+      format_version: '1.2'
+      jupytext_version: 1.3.0
+  kernelspec:
+    display_name: Python 3
+    language: python
+    name: python3
+---
+
+```{python}
+# %autosave 0
+import numpy as np
+import matplotlib
+import matplotlib.pyplot as plt
+from mpl_toolkits import mplot3d
+plt.style.use('dark_background')
+import scipy.integrate as integrate
+import scipy.optimize as optimize
+```
+
+### Dados de entrada do problema
+
+```{python}
+# Dados iniciais
+max_radius = 41 # Raio do aerogerador, em metros
+density = 1.225 # Massa específica do ar, em kg/m^3
+rot_speed = 18 # Velocidade do rotor, em RPM
+wind_speed = 14 # Velocidade do vento, em m/s
+nom_power = 2e6 # Potência nominal, em watts
+coef_lift = 1.2 # Coeficiente de sustentação das pás, adimensional
+coef_drag = 0.08 # Coeficiente de arrasto das pás, adimensional
+chord = 2 # Comprimento da linha de corda das pás, em metros
+```
+
+# Definições de função
+Que são utilizadas nos cálculos posteriores
+
+```{python}
+# Definição de função para a potência de escoamento do vento
+def p_wind(density, radius, v_wind):
+    area = np.pi * radius ** 2
+    return 0.5 * density * area * v_wind ** 3
+```
+
+```{python}
+# Converte rotação em RPM para velocidade angular
+def angular_velocity(rot_speed):
+    return 2 * np.pi * rot_speed / 60
+```
+
+```{python}
+# Calcula a velocidade tangencial em um ponto da pá
+def tan_speed_blade(rot_speed, radius):
+    return angular_velocity(rot_speed) * radius
+```
+
+```{python}
+# Função para calcular a velocidade relativa do vento em um ponto
+# específico do rotor
+def wind_rel_speed(wind_speed, rot_speed, radius):
+    tan_speed = tan_speed_blade(rot_speed, radius)
+    return np.sqrt(np.square(tan_speed) + np.square(wind_speed))
+```
+
+```{python}
+# Calcula a força de sustentação em um ponto da pá (secção)
+def lift_force_section(wind_speed, rot_speed, radius, lift_coef, chord, air_density):
+    rel_speed = wind_rel_speed(wind_speed, rot_speed, radius)
+    return 0.5 * air_density * np.square(rel_speed) * lift_coef * chord
+```
+
+```{python}
+# Calcula a força de arrasto em um ponto da pá (secção)
+def drag_force_section(wind_speed, rot_speed, radius, drag_coef, chord, air_density):
+    rel_speed = wind_rel_speed(wind_speed, rot_speed, radius)
+    return 0.5 * air_density * np.square(rel_speed) * drag_coef * chord
+```
+
+```{python}
+# Calcula o ângulo gamma, formado entre o vento relativo e o incidente
+def gamma_angle(wind_speed, rot_speed, radius):
+    return np.arctan(tan_speed_blade(rot_speed, radius)/wind_speed)
+```
+
+```{python}
+# Calcula a força tangencial em um ponto da pá
+def tan_force_section(wind_speed, rot_speed, radius, lift_coef, drag_coef,
+                     chord, air_density):
+    lift = lift_force_section(wind_speed, rot_speed, radius, lift_coef, chord, air_density)
+    drag = drag_force_section(wind_speed, rot_speed, radius, drag_coef, chord, air_density)
+    gamma = gamma_angle(wind_speed, rot_speed, radius)
+    return lift * np.cos(gamma) - drag * np.sin(gamma)
+```
+
+```{python}
+# Calcula a força axial em um ponto da pá
+def axial_force_section(wind_speed, rot_speed, radius, lift_coef, drag_coef,
+                        chord, air_density):
+    lift = lift_force_section(wind_speed, rot_speed, radius, lift_coef, chord, air_density)
+    drag = drag_force_section(wind_speed, rot_speed, radius, drag_coef, chord, air_density)
+    gamma = gamma_angle(wind_speed, rot_speed, radius)
+    return -lift * np.sin(gamma) - drag * np.cos(gamma)
+```
+
+# Resolução inicial do problema
+Com os valores iniciais trazidos de exemplo
+
+```{python}
+# Cálculo do ângulo gamma e das forças de sustentação e arrasto
+radius = 20.5
+gamma = gamma_angle(wind_speed, rot_speed, radius)
+f_lift_sec = lift_force_section(wind_speed, rot_speed, radius, coef_lift, chord, density)
+f_drag_sec = drag_force_section(wind_speed, rot_speed, radius, coef_drag, chord, density)
+print('Ângulo gamma: ',np.rad2deg(gamma),'\n',
+      'Força de sustentação: ', f_lift_sec,'\n',
+      'Força de arrasto: ', f_drag_sec)
+```
+
+```{python}
+f_tan = tan_force_section(wind_speed, rot_speed, radius, coef_lift, coef_drag,
+                         chord, density)
+f_ax = axial_force_section(wind_speed, rot_speed, radius, coef_lift, coef_drag,
+                           chord, density)
+print('Força tangencial: ', f_tan)
+print('Força axial: ',f_ax)
+```
+
+```{python}
+blade_momentum = integrate.quad(lambda r: tan_force_section(
+    wind_speed, rot_speed, r, coef_lift, coef_drag, chord, density) * r,
+                               0, max_radius)[0]
+total_momentum = blade_momentum * 3
+required_momentum = nom_power / angular_velocity(rot_speed)
+print('Torque total obtido: ', total_momentum)
+print('Torque necessário: ', required_momentum)
+```
+
+# Otimização para potência nominal
+Otimiza os parâmetros aerodinâmicos da pá para obter a potência nominal do aerogerador sob as condições pré-determinadas
+
+```{python}
+# Define uma função a ser minimizada
+def momentum_delta(params, wind_speed, rot_speed, max_radius, air_density, required_momentum):
+    # A assinatura da função é feita para adequar-se à função optimize.minimize. Os elementos
+    # a otimizar ficam no array "params", e são, na ordem:
+    # params[0] - coeficiente de sustentação, Cl
+    # params[1] - coeficiente de arrasto, Cd
+    # params[2] - comprimento da linha de corda, C
+    blade_momentum = integrate.quad(lambda r: tan_force_section(
+        wind_speed, rot_speed, r, params[0], params[1], params[2], air_density) * r,
+                                   0, max_radius)[0]
+    total_momentum = blade_momentum * 3
+    return np.abs(total_momentum - required_momentum)
+
+# Define as restrições: coeficientes maiores que zero, e linha de corda entre 0 e 3
+bounds = optimize.Bounds([0, 0, 0], [np.inf, np.inf, 3])
+```
+
+```{python}
+power_optim = optimize.minimize(fun=momentum_delta,
+                        x0=[1.2, 0.08, 2],
+                        args=(wind_speed, rot_speed, max_radius, density,
+                                             required_momentum),
+                        method='trust-constr',
+                        bounds=bounds)
+
+print('Parâmetros otimizados para a potência nominal: ', power_optim.x)
+```
+
+# Otimização para o momento axial
+
+```{python}
+# Define uma função a ser otimizada
+def axial_momentum(params, wind_speed, rot_speed, max_radius, air_density):
+    # Calcula o momento axial em uma pá. A assinatura desta função é adaptada à chamada
+    # da função optimize.minimize. Os elementos a otimizar ficam no array "params":
+    # params[0] - Coeficiente de sustentação, Cl
+    # params[1] - Coeficiente de arrasto, Cd
+    # params[2] - Comprimento da linha de corda, C
+    return np.abs(integrate.quad(lambda r: axial_force_section(
+        wind_speed, rot_speed, r, params[0], params[1], params[2], air_density) * r,
+                                 0, max_radius)[0])
+```
+
+```{python}
+# Define as restrições para o problema
+nonlin_constraint = optimize.NonlinearConstraint(lambda p:
+                                          [momentum_delta(p, wind_speed, rot_speed,
+                                                         max_radius, density,
+                                                         required_momentum)],
+                                          lb=[0],
+                                          ub=[0])
+lin_constraint = optimize.LinearConstraint(np.identity(3), [0.5, 0.05, 2], [4, 4, 5])
+```
+
+```{python}
+axial_optim = optimize.minimize(fun=axial_momentum,
+                               x0=power_optim.x,
+                               args=(wind_speed, rot_speed, max_radius, density),
+                               method='trust-constr',
+                               constraints=[nonlin_constraint, lin_constraint])
+```
+
+# Exibição de resultados
+
+```{python}
+x = np.linspace(0, max_radius) # Pontos ao longo da pá
+y = np.linspace(0, rot_speed) # Pontos ao longo da velocidade de rotação
+X, Y = np.meshgrid(x, y)
+Z = np.rad2deg(gamma_angle(wind_speed, Y, X))
+fig = plt.figure()
+ax = plt.axes(projection='3d')
+ax.plot_surface(X, Y, Z, rstride=1, cstride=1,
+               cmap='winter', edgecolor='none')
+plt.show()
+```
